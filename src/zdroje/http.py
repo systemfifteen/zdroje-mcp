@@ -25,11 +25,53 @@ class BlockedTarget(Exception):
     """Raised when an outbound request targets a non-public / private address (SSRF guard)."""
 
 
-def _assert_public_url(url: str) -> None:
-    """Reject non-http(s) schemes and hosts resolving to private/loopback/link-local/reserved IPs.
+# Ranges that are not globally routable but that `is_private`/`is_global` miss on some
+# interpreters (belt-and-suspenders alongside the `not is_global` check below).
+_EXTRA_BLOCKED_NETS = (
+    ipaddress.ip_network("100.64.0.0/10"),  # RFC 6598 CGNAT / shared address space
+    ipaddress.ip_network("198.18.0.0/15"),  # RFC 2544 benchmarking
+    ipaddress.ip_network("192.0.0.0/24"),   # RFC 6890 IETF protocol assignments
+)
 
-    Blocks the token-holder `fetch` tool from reaching internal services (SSRF). Also used on each
-    redirect hop. Legitimate sources (egov.banskabystrica.sk, dennikn.sk, …) are public → pass.
+
+def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True if an outbound request must never reach this IP (SSRF guard)."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:  # unwrap ::ffff:127.0.0.1 → 127.0.0.1
+        ip = mapped
+    if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+            or ip.is_multicast or ip.is_unspecified or not ip.is_global):
+        return True
+    return any(ip in net for net in _EXTRA_BLOCKED_NETS)
+
+
+def _resolve_public(host: str, port: int) -> str:
+    """Resolve `host`, require EVERY resolved address to be public, and return one to pin to.
+
+    Returning the checked IP lets the transport connect to exactly that address, closing the
+    DNS-rebinding TOCTOU (our check and httpx's own connect-time lookup could otherwise differ).
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise BlockedTarget(f"DNS resolution failed for {host}: {exc}") from exc
+    pinned: str | None = None
+    for info in infos:
+        addr = info[4][0]
+        if _ip_blocked(ipaddress.ip_address(addr)):
+            raise BlockedTarget(f"blocked non-public target: {host} -> {addr}")
+        if pinned is None:
+            pinned = addr
+    if pinned is None:
+        raise BlockedTarget(f"no addresses for {host}")
+    return pinned
+
+
+def _assert_public_url(url: str) -> None:
+    """Reject non-http(s) schemes and hosts that resolve to any non-public IP (early friendly check).
+
+    The authoritative enforcement is `_PinnedTransport`; this runs first for a clear error and to
+    validate the scheme before throttling. Legit sources (egov.banskabystrica.sk, dennikn.sk) pass.
     """
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
@@ -37,20 +79,38 @@ def _assert_public_url(url: str) -> None:
     host = parts.hostname
     if not host:
         raise BlockedTarget("blocked: no host in URL")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except OSError as exc:
-        raise BlockedTarget(f"DNS resolution failed for {host}: {exc}") from exc
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
-            raise BlockedTarget(f"blocked non-public target: {host} -> {ip}")
+    _resolve_public(host, parts.port or (443 if parts.scheme == "https" else 80))
+
+
+class _PinnedTransport(httpx.AsyncHTTPTransport):
+    """Resolve + validate the host and pin the TCP connection to the checked IP.
+
+    Runs on every hop (including redirects). Without pinning, our getaddrinfo check and httpx's own
+    connect-time lookup can differ, letting a malicious resolver point the second lookup at
+    127.0.0.1 / 169.254.169.254 (DNS rebinding). We connect to the validated IP but keep the
+    original hostname for the Host header, TLS SNI and certificate verification, then restore the
+    URL so redirect resolution and `response.url` stay correct.
+    """
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        url = request.url
+        if url.scheme not in ("http", "https"):
+            raise BlockedTarget(f"blocked scheme: {url.scheme or '(none)'}")
+        host = url.host
+        if not host:
+            raise BlockedTarget("blocked: no host in URL")
+        port = url.port or (443 if url.scheme == "https" else 80)
+        pinned_ip = _resolve_public(host, port)
+        request.extensions["sni_hostname"] = host  # TLS SNI + cert check against the real host
+        request.url = url.copy_with(host=pinned_ip)  # connect to the exact validated IP
+        try:
+            return await super().handle_async_request(request)
+        finally:
+            request.url = url  # restore for redirect resolution / response.url
 
 
 async def _redirect_guard(resp: "httpx.Response") -> None:
-    """Validate each redirect hop before httpx follows it."""
+    """Validate each redirect hop before httpx follows it (defence in depth atop the transport)."""
     if resp.is_redirect:
         loc = resp.headers.get("location")
         if loc:
@@ -80,6 +140,7 @@ class Http:
                 "User-Agent": settings.user_agent,
                 "Accept-Language": "sk,cs;q=0.8,en;q=0.5",
             },
+            transport=_PinnedTransport(),
             event_hooks={"response": [_redirect_guard]},
         )
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
