@@ -1,0 +1,25 @@
+# secrets & local config
+.env
+.env.*
+!.env.example
+
+# runtime data (SQLite index, downloaded PDFs, cache)
+data/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# scratch
+tmp/

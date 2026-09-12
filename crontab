@@ -1,0 +1,3 @@
+# supercronic format (standard cron, TZ from container env)
+# Every night at 03:10: index current + previous year of MsZ documents.
+10 3 * * * cd /app && python -m zdroje.indexer

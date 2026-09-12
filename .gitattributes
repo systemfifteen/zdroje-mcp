@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sh text eol=lf
+crontab text eol=lf
+*.png binary
+*.pdf binary

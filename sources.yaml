@@ -1,0 +1,47 @@
+# Source registry. Adding a WordPress site = a few lines; HTML sites need CSS selectors.
+# Verified 2026-09-12, see PRD.md §5.
+
+- id: bbonline
+  name: BBonline
+  kind: news
+  adapter: wordpress_api
+  base_url: https://bbonline.sk
+
+- id: bystricoviny
+  name: Bystricoviny
+  kind: news
+  adapter: wordpress_rss
+  base_url: https://www.bystricoviny.sk
+  article:
+    body: ".post-entry, .entry-content, article"
+
+- id: bystricak
+  name: Bystricak
+  kind: news
+  adapter: html_search
+  base_url: https://www.bystricak.sk
+  search:
+    path: "/?s={q}"
+    item: "div.card__post"
+    title: ".card__post__title a"
+    url_pattern: "/clanky/"
+  article:
+    body: ".wrap__article-detail-content, .full-article, article"
+
+- id: dennikn
+  name: Denník N
+  kind: news
+  adapter: dennikn
+  base_url: https://dennikn.sk
+  extra_hosts: ["e.dennikn.sk"]
+  paywalled: true
+  article:
+    body: ".n3_content__single, .entry-content, article"
+
+- id: msz
+  name: MsZ Banská Bystrica (eGOV)
+  kind: council
+  adapter: egov
+  base_url: https://egov.banskabystrica.sk
+  nav_state: "261:0:"
+  body: "Mestské zastupiteľstvo"
