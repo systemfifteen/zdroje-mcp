@@ -1,3 +1,4 @@
 # supercronic format (standard cron, TZ from container env)
 # Every night at 03:10: index current + previous year of MsZ documents.
-10 3 * * * cd /app && python -m zdroje.indexer
+# nice/ionice: run at idle CPU + IO priority so it never starves the live server.
+10 3 * * * cd /app && nice -n 19 ionice -c 3 python -m zdroje.indexer
