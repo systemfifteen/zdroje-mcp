@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from .base import ARTICLE_TTL, AdapterError, Article
 from .wordpress_rss import WordPressRssAdapter
+
+# Subscription cookie sa smie posielať IBA na dennikn.sk cez HTTPS (nie HTTP, nie iný host).
+_COOKIE_HOSTS = {"dennikn.sk", "www.dennikn.sk", "e.dennikn.sk"}
 
 # Strings that appear on a locked article when the reader is not recognised as a subscriber.
 PAYWALL_MARKERS = (
@@ -27,8 +32,10 @@ class DennikNAdapter(WordPressRssAdapter):
         return any(marker in html for marker in PAYWALL_MARKERS)
 
     async def fetch(self, url: str, max_chars: int) -> Article:
-        headers = {"Cookie": self.cookie} if self.cookie else None
-        scope = "dennikn-auth" if self.cookie else "dennikn-anon"
+        parts = urlsplit(url)
+        cookie_ok = bool(self.cookie) and parts.scheme == "https" and (parts.hostname or "").lower() in _COOKIE_HOSTS
+        headers = {"Cookie": self.cookie} if cookie_ok else None
+        scope = "dennikn-auth" if cookie_ok else "dennikn-anon"
         resp = await self.http.get(url, headers=headers, ttl=ARTICLE_TTL, cache_scope=scope)
         if not resp.ok:
             raise AdapterError("http_error", f"Denník N returned HTTP {resp.status}")

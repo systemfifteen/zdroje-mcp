@@ -51,9 +51,14 @@ mcp = FastMCP(
     instructions=INSTRUCTIONS,
     stateless_http=True,
     json_response=True,
-    # Za Traefikom (bez host portu) + TokenAuth pred /mcp; DNS-rebinding ochranu
-    # netreba a jej auto-zapnutie pre default host 127.0.0.1 blokuje produkčný Host.
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    # DNS-rebinding ochrana ZAPNUTÁ s explicitným allowlistom produkčného hosta
+    # (default 127.0.0.1 by inak blokoval verejný Host). /healthz obsluhuje TokenAuth
+    # wrapper ešte pred SDK, takže loopback výnimku netreba.
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["zdroje.system15.win", "zdroje.system15.win:443"],
+        allowed_origins=["https://zdroje.system15.win"],
+    ),
 )
 
 
@@ -184,6 +189,8 @@ async def fetch(url: str, max_chars: int = 20000) -> dict[str, Any]:
         return {"error": exc.code, "message": exc.message, "url": url, "source": adapter.id}
     except asyncio.TimeoutError:
         return {"error": "timeout", "message": "fetch timed out", "url": url, "source": adapter.id}
+    except Exception as exc:  # napr. SSRF guard (BlockedTarget) alebo iná chyba klienta
+        return {"error": "fetch_failed", "message": str(exc)[:200], "url": url, "source": adapter.id}
 
 
 @mcp.tool()
@@ -220,6 +227,14 @@ def msz_sessions(year: int | None = None) -> dict[str, Any]:
 # --- ASGI app with token auth ----------------------------------------------
 
 
+def _ct_eq(a: str, b: str) -> bool:
+    """Constant-time equality that never raises on non-ASCII input (compare as bytes)."""
+    try:
+        return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+    except Exception:
+        return False
+
+
 class TokenAuth:
     """Accepts /mcp/<token>[/...] (secret path, for clients without custom headers) or
     /mcp with `Authorization: Bearer <token>`. Everything else is 404. /healthz is open."""
@@ -246,7 +261,7 @@ class TokenAuth:
         prefix = self.mcp_path + "/"
         if path.startswith(prefix):
             candidate, _, rest = path[len(prefix):].partition("/")
-            if candidate and secrets.compare_digest(candidate, self.token):
+            if candidate and _ct_eq(candidate, self.token):
                 authorized = True
             elif not candidate:
                 rest = ""
@@ -268,7 +283,7 @@ class TokenAuth:
         for name, value in scope.get("headers", []):
             if name == b"authorization":
                 kind, _, tok = value.decode("latin-1").partition(" ")
-                return kind.lower() == "bearer" and bool(tok) and secrets.compare_digest(tok.strip(), self.token)
+                return kind.lower() == "bearer" and bool(tok) and _ct_eq(tok.strip(), self.token)
         return False
 
     @staticmethod

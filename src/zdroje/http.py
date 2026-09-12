@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
+import socket
 import sqlite3
 import time
 from collections import defaultdict
@@ -17,6 +19,42 @@ from . import db
 from .config import Settings
 
 log = logging.getLogger(__name__)
+
+
+class BlockedTarget(Exception):
+    """Raised when an outbound request targets a non-public / private address (SSRF guard)."""
+
+
+def _assert_public_url(url: str) -> None:
+    """Reject non-http(s) schemes and hosts resolving to private/loopback/link-local/reserved IPs.
+
+    Blocks the token-holder `fetch` tool from reaching internal services (SSRF). Also used on each
+    redirect hop. Legitimate sources (egov.banskabystrica.sk, dennikn.sk, …) are public → pass.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise BlockedTarget(f"blocked scheme: {parts.scheme or '(none)'}")
+    host = parts.hostname
+    if not host:
+        raise BlockedTarget("blocked: no host in URL")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise BlockedTarget(f"DNS resolution failed for {host}: {exc}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            raise BlockedTarget(f"blocked non-public target: {host} -> {ip}")
+
+
+async def _redirect_guard(resp: "httpx.Response") -> None:
+    """Validate each redirect hop before httpx follows it."""
+    if resp.is_redirect:
+        loc = resp.headers.get("location")
+        if loc:
+            _assert_public_url(str(resp.url.join(loc)))
 
 
 @dataclass
@@ -42,6 +80,7 @@ class Http:
                 "User-Agent": settings.user_agent,
                 "Accept-Language": "sk,cs;q=0.8,en;q=0.5",
             },
+            event_hooks={"response": [_redirect_guard]},
         )
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_request: dict[str, float] = {}
@@ -81,6 +120,7 @@ class Http:
             if hit is not None:
                 return Response(hit[0], hit[1], full_url, from_cache=True)
 
+        _assert_public_url(full_url)
         await self._throttle(full_url)
         resp = await self.client.get(full_url, headers=headers)
         log.debug("GET %s -> %s", full_url, resp.status_code)
@@ -90,12 +130,14 @@ class Http:
         return out
 
     async def get_bytes(self, url: str, *, headers: dict | None = None, timeout: float | None = None) -> tuple[int, bytes, dict]:
+        _assert_public_url(url)
         await self._throttle(url)
         resp = await self.client.get(url, headers=headers, timeout=timeout if timeout else httpx.USE_CLIENT_DEFAULT)
         log.debug("GET(bytes) %s -> %s (%d B)", url, resp.status_code, len(resp.content))
         return resp.status_code, resp.content, dict(resp.headers)
 
     async def post(self, url: str, *, data: dict, headers: dict | None = None) -> Response:
+        _assert_public_url(url)
         await self._throttle(url)
         resp = await self.client.post(url, data=data, headers=headers)
         log.debug("POST %s -> %s", url, resp.status_code)
