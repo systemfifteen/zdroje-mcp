@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from . import db, index
 from .adapters import Adapter, AdapterError
@@ -50,6 +51,9 @@ mcp = FastMCP(
     instructions=INSTRUCTIONS,
     stateless_http=True,
     json_response=True,
+    # Za Traefikom (bez host portu) + TokenAuth pred /mcp; DNS-rebinding ochranu
+    # netreba a jej auto-zapnutie pre default host 127.0.0.1 blokuje produkčný Host.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
 
