@@ -166,3 +166,28 @@ def test_document_upsert_is_idempotent_and_migration_dedupes(tmp_path):
     conn = db.connect(tmp_path / "d.sqlite")  # reconnect recreates the guard index
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO documents(session_id, doc_type, name) VALUES (1, 'hlasovanie', 'H.PDF')")
+
+
+def test_ssrf_guard_blocks_non_public_addresses():
+    import ipaddress
+
+    from zdroje.http import BlockedTarget, _assert_public_url, _ip_blocked
+
+    blocked = [
+        "127.0.0.1", "10.0.0.1", "172.16.5.4", "192.168.1.1",   # loopback + RFC 1918
+        "169.254.169.254",                                       # link-local / cloud metadata
+        "100.64.0.1",                                            # RFC 6598 CGNAT (is_private is False)
+        "198.18.0.1", "192.0.0.8", "0.0.0.0", "224.0.0.1",       # benchmarking, IETF, unspecified, multicast
+        "::1", "fe80::1", "fd00::1",                             # IPv6 loopback, link-local, ULA
+        "::ffff:127.0.0.1", "::ffff:10.0.0.1",                   # IPv4-mapped IPv6 must be unwrapped
+    ]
+    for addr in blocked:
+        assert _ip_blocked(ipaddress.ip_address(addr)), addr
+    for addr in ["1.1.1.1", "91.221.5.16", "2606:4700:4700::1111"]:
+        assert not _ip_blocked(ipaddress.ip_address(addr)), addr
+
+    # Literal-IP and scheme checks need no DNS, so they are safe to run offline.
+    for url in ["http://127.0.0.1:8000/", "http://[::ffff:127.0.0.1]/", "http://2130706433/",
+                "file:///etc/passwd", "gopher://example.org/", "http:///nohost"]:
+        with pytest.raises(BlockedTarget):
+            _assert_public_url(url)
