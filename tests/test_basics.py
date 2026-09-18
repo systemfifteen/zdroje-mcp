@@ -135,3 +135,34 @@ def test_token_auth_paths():
     assert seen_paths == ["/mcp", "/mcp", "/mcp"]  # token stripped, inner app always sees /mcp
 
     assert asyncio.run(_call(TokenAuth(inner, "", "/mcp"), "/mcp/x"))[0] == 503
+
+
+def test_document_upsert_is_idempotent_and_migration_dedupes(tmp_path):
+    from zdroje.adapters.egov import DocRef
+    from zdroje.indexer import upsert_document
+
+    conn = db.connect(tmp_path / "d.sqlite")
+    conn.execute("INSERT INTO sessions(body, year, number, date) VALUES ('MsZ', 2026, '24', '2026-09-08')")
+    ref = DocRef("hlasovanie", "Hlasovanie", "H.PDF", "2026-09-09", "1 kB", "ARG1", "u")
+    first = upsert_document(conn, 1, ref)
+    ref.arguments = "ARG2"  # portal rotated the opaque token
+    second = upsert_document(conn, 1, ref)
+    assert first["id"] == second["id"] and second["egov_arguments"] == "ARG2"
+    child_a = upsert_document(conn, 1, DocRef("material", "M", "a.pdf", None, None, "Z", "u"), parent_zip_id=first["id"])
+    child_b = upsert_document(conn, 1, DocRef("material", "M", "a.pdf", None, None, "Z", "u"), parent_zip_id=first["id"])
+    assert child_a["id"] == child_b["id"]
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 2
+
+    # Simulate a database written by the old code: duplicates of a top-level row, one owning pages.
+    conn.execute("DROP INDEX documents_identity")
+    conn.execute("INSERT INTO pages(document_id, page_no, text) VALUES (?, 1, 'text')", (first["id"],))
+    for _ in range(3):
+        conn.execute("INSERT INTO documents(session_id, doc_type, name) VALUES (1, 'hlasovanie', 'H.PDF')")
+    conn.commit()
+    assert db.dedupe_documents(conn) == 3
+    assert [r[0] for r in conn.execute("SELECT id FROM documents WHERE name='H.PDF'")] == [first["id"]]
+    assert conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0] == 1  # pages and ZIP members untouched
+    conn.close()
+    conn = db.connect(tmp_path / "d.sqlite")  # reconnect recreates the guard index
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO documents(session_id, doc_type, name) VALUES (1, 'hlasovanie', 'H.PDF')")

@@ -116,18 +116,30 @@ def upsert_session(conn: sqlite3.Connection, s: Session) -> int:
 
 
 def upsert_document(conn: sqlite3.Connection, session_id: int, d: DocRef, parent_zip_id: int | None = None) -> sqlite3.Row:
-    conn.execute(
-        """INSERT INTO documents(session_id, doc_type, label, name, published_at, egov_arguments, size_text, parent_zip_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(session_id, doc_type, name, parent_zip_id) DO UPDATE SET
-               label=excluded.label, published_at=excluded.published_at,
-               egov_arguments=excluded.egov_arguments, size_text=excluded.size_text""",
-        (session_id, d.doc_type, d.label, d.name, d.published_at, d.arguments, d.size_text, parent_zip_id),
-    )
-    return conn.execute(
-        "SELECT * FROM documents WHERE session_id=? AND doc_type=? AND name=? AND parent_zip_id IS ?",
+    """Insert or refresh one document row. Identity = (session, type, name, parent ZIP).
+
+    Explicit select-then-write instead of ON CONFLICT: SQLite's UNIQUE treats NULL parent_zip_id as
+    distinct, so a conflict clause never fires for top-level documents.
+    """
+    existing = conn.execute(
+        "SELECT id FROM documents WHERE session_id=? AND doc_type=? AND name=? AND parent_zip_id IS ? "
+        "ORDER BY id LIMIT 1",
         (session_id, d.doc_type, d.name, parent_zip_id),
     ).fetchone()
+    if existing is None:
+        cur = conn.execute(
+            """INSERT INTO documents(session_id, doc_type, label, name, published_at, egov_arguments, size_text, parent_zip_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, d.doc_type, d.label, d.name, d.published_at, d.arguments, d.size_text, parent_zip_id),
+        )
+        doc_id = cur.lastrowid
+    else:
+        doc_id = existing["id"]
+        conn.execute(
+            "UPDATE documents SET label=?, published_at=?, egov_arguments=?, size_text=? WHERE id=?",
+            (d.label, d.published_at, d.arguments, d.size_text, doc_id),
+        )
+    return conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
 
 
 def store_pages(conn: sqlite3.Connection, doc_id: int, pages: list[str], local_path: Path | None, sha: str | None) -> None:

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -91,7 +94,47 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA)
+    _ensure_document_identity(conn)
     return conn
+
+
+def dedupe_documents(conn: sqlite3.Connection) -> int:
+    """Remove duplicate top-level document rows left by the pre-0.1.1 upsert.
+
+    SQLite treats NULLs as distinct in UNIQUE constraints, so UNIQUE(..., parent_zip_id) never fired
+    for top-level documents (parent_zip_id IS NULL) and every indexer run inserted a fresh, empty copy.
+    Keeps the oldest row of each group; never deletes a row that owns pages or ZIP members.
+    """
+    cur = conn.execute(
+        """DELETE FROM documents
+           WHERE parent_zip_id IS NULL
+             AND id NOT IN (SELECT MIN(id) FROM documents WHERE parent_zip_id IS NULL
+                            GROUP BY session_id, doc_type, name)
+             AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.document_id = documents.id)
+             AND NOT EXISTS (SELECT 1 FROM documents c WHERE c.parent_zip_id = documents.id)"""
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def _ensure_document_identity(conn: sqlite3.Connection) -> None:
+    """One-time cleanup + a unique index that treats NULL parent_zip_id as 0."""
+    has_index = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='documents_identity'"
+    ).fetchone()
+    if has_index:
+        return
+    removed = dedupe_documents(conn)
+    if removed:
+        log.warning("removed %d duplicate document rows", removed)
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS documents_identity "
+            "ON documents(session_id, doc_type, name, COALESCE(parent_zip_id, 0))"
+        )
+        conn.commit()
+    except sqlite3.Error as exc:  # duplicates that own pages: keep serving, upsert logic still prevents new ones
+        log.error("could not create documents_identity index: %s", exc)
 
 
 # --- source status ---------------------------------------------------------
