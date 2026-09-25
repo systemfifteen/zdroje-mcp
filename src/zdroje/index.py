@@ -191,7 +191,9 @@ def list_sessions(conn: sqlite3.Connection, year: int | None = None, *, base_url
     ]
 
 
-def stats(conn: sqlite3.Connection) -> dict[str, Any]:
+def stats(conn: sqlite3.Connection, source_id: str = "msz") -> dict[str, Any]:
+    """Index statistics. Freshness: `last_run_ok_at` = last successful indexer run over a year;
+    `last_indexed_at` = newest document processed (does not move when the portal has nothing new)."""
     row = conn.execute(
         """SELECT (SELECT COUNT(*) FROM sessions) AS sessions,
                   (SELECT COUNT(*) FROM documents) AS documents,
@@ -202,4 +204,11 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
                   (SELECT MIN(year) FROM sessions) AS first_year,
                   (SELECT MAX(year) FROM sessions) AS last_year"""
     ).fetchone()
-    return dict(row) if row else {}
+    out = dict(row) if row else {}
+    st = conn.execute(
+        "SELECT last_ok_at, last_error, last_error_at FROM source_status WHERE source_id = ?", (source_id,)
+    ).fetchone()
+    out["last_run_ok_at"] = st["last_ok_at"] if st else None
+    if st and st["last_error_at"] and (not st["last_ok_at"] or st["last_error_at"] > st["last_ok_at"]):
+        out["last_run_error"] = {"at": st["last_error_at"], "message": st["last_error"]}
+    return out

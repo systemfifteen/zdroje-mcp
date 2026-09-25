@@ -4,8 +4,9 @@ set -eu
 mkdir -p "${DATA_DIR:-/data}"
 
 # Nightly MsZ indexer via supercronic (background), server in foreground.
+# Bez -quiet: výstup jobu (vrátane riadku "done: {...}" a chýb) ide do docker logs.
 if [ "${DISABLE_CRON:-0}" != "1" ]; then
-  supercronic -quiet /app/crontab &
+  supercronic /app/crontab &
 fi
 
 # --no-access-log: token-in-path variant (/mcp/<token>) sa nesmie zapisovať do access logu.

@@ -310,7 +310,13 @@ async def amain(args: argparse.Namespace) -> int:
         stats = await indexer.run(years, force=args.force)
         purged = db.cache_purge_expired(conn)
         log.info("done: %s; purged %d expired cache rows", stats, purged)
+        # exit 1 = run finished, but some documents could not be indexed (e.g. scans without text)
         return 0 if stats["failed"] == 0 else 1
+    except Exception as exc:  # the run itself broke (portal down, bug): make it visible in list_sources
+        log.exception("indexer run failed")
+        if registry.egov is not None:
+            db.mark_error(conn, registry.egov.id, f"indexer run failed: {exc!r}")
+        return 2
     finally:
         await registry.aclose()
         conn.close()

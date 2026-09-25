@@ -191,3 +191,36 @@ def test_ssrf_guard_blocks_non_public_addresses():
                 "file:///etc/passwd", "gopher://example.org/", "http:///nohost"]:
         with pytest.raises(BlockedTarget):
             _assert_public_url(url)
+
+
+def test_stats_freshness_uses_last_successful_run(tmp_path):
+    conn = db.connect(tmp_path / "f.sqlite")
+    s = index.stats(conn)
+    assert s["last_run_ok_at"] is None and "last_run_error" not in s
+    db.mark_ok(conn, "msz")
+    s = index.stats(conn)
+    assert s["last_run_ok_at"] and "last_run_error" not in s
+    conn.execute("UPDATE source_status SET last_ok_at='2026-01-01T00:00:00+00:00' WHERE source_id='msz'")
+    db.mark_error(conn, "msz", "indexer run failed: portal down")
+    assert index.stats(conn)["last_run_error"]["message"].endswith("portal down")
+    db.mark_ok(conn, "msz")                         # a later good run hides the old error
+    assert "last_run_error" not in index.stats(conn)
+
+
+def test_indexer_crash_is_recorded(tmp_path, monkeypatch):
+    import argparse
+    from zdroje import indexer as ix
+
+    settings = _settings(tmp_path)
+    (tmp_path / "s.yaml").write_text("- id: msz\n  name: MsZ\n  kind: council\n  adapter: egov\n"
+                                     "  base_url: https://egov.banskabystrica.sk\n  body: Mestské zastupiteľstvo\n")
+    monkeypatch.setattr(ix, "load_settings", lambda: settings)
+
+    async def boom(self):
+        raise RuntimeError("portal down")
+
+    monkeypatch.setattr(EgovAdapter, "list_years", boom)
+    rc = asyncio.run(ix.amain(argparse.Namespace(all=False, years=None, year=None, force=False)))
+    assert rc == 2
+    conn = db.connect(settings.db_path)
+    assert "portal down" in index.stats(conn)["last_run_error"]["message"]
