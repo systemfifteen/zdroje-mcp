@@ -8,7 +8,9 @@ ENV PYTHONUNBUFFERED=1 \
     TZ=Europe/Bratislava
 
 # poppler-utils -> pdftotext; tzdata for cron times; curl for the healthcheck
+# apt-get upgrade: bezpečnostné opravy Debianu aj keď python:slim mešká (brotli CVE-2026-111497 10/2026)
 RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends poppler-utils ca-certificates curl tzdata \
  && rm -rf /var/lib/apt/lists/*
 
