@@ -16,6 +16,12 @@ Single-user, personal research tool. Product requirements live in [PRD.md](PRD.m
 | `msz_search(query, year?, doc_type?, limit?)` | FTS5 full-text search over indexed MsZ documents (page-level hits with snippets) |
 | `msz_document(doc_id, page_from?, page_to?, max_chars?)` | text of one indexed document |
 | `msz_sessions(year?)` | sessions with their documents and `doc_id`s |
+| `vault_start(recent?)` | owner's Obsidian vault: start note (`AGENTS.md`), project overview, folder tree, recently modified notes |
+| `vault_search(query, folder?, limit?)` | case/diacritics-insensitive AND search over vault notes with line snippets |
+| `vault_read(path, start_line?, end_line?, max_chars?)` | one note by path or wikilink name, with outgoing links and backlinks |
+
+The vault tools are **read-only** and sandboxed to `VAULT_DIR`: absolute paths, `..`, hidden segments
+(`.obsidian`, `.trash`) and symlinks leaving the vault are refused; only `.md` notes are served.
 
 ## Run locally
 
@@ -39,6 +45,10 @@ Dockerfile app, port 8000, persistent volume mounted at `/data`. Environment:
 | `DENNIKN_COOKIE` | optional; `Cookie` header value of a logged-in dennikn.sk session |
 | `USER_AGENT_CONTACT` | optional; email/URL appended to the User-Agent |
 | `DISABLE_CRON` | set `1` to skip the nightly indexer |
+| `VAULT_DIR` | optional; path of the Obsidian vault inside the container, e.g. `/vault` (bind mount, **read-only**) |
+| `VAULT_EXCLUDE` | optional; comma-separated vault folders/notes to hide, e.g. `Medrio,Infraštruktúra/Rotácia tajomstiev.md` |
+
+Vault bind mount on kocka: host `/home/fifteen/obsidian-sync/vaults/peter/Fifteen` → container `/vault`, read-only.
 
 The container runs the nightly indexer (03:10 Europe/Bratislava) via supercronic. First backfill:
 

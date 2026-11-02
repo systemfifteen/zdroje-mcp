@@ -19,6 +19,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from . import db, index
 from .adapters import Adapter, AdapterError
+from .vault import Vault, VaultError
 from .adapters.base import parse_date_bound
 from .config import load_settings
 from .registry import Registry
@@ -34,7 +35,23 @@ registry = Registry(settings, conn)
 PER_SOURCE_TIMEOUT = 15.0
 GENERIC_WEB = Adapter({"id": "web", "name": "web", "kind": "news"}, registry.http, settings)
 
-INSTRUCTIONS = """Zdroje MCP: Banská Bystrica news sources and city council (MsZ) documents.
+vault: Vault | None = None
+if settings.vault_dir and settings.vault_dir.is_dir():
+    vault = Vault(settings.vault_dir, settings.vault_exclude)
+    log.info("vault: %s (%d notes, excluded: %s)", vault.root, len(vault.notes()), ", ".join(vault.exclude) or "-")
+elif settings.vault_dir:
+    log.warning("VAULT_DIR %s is not a directory; vault tools disabled", settings.vault_dir)
+
+INSTRUCTIONS = """Zdroje MCP: Peter's Obsidian vault, Banská Bystrica news sources and city council (MsZ) documents.
+
+Vault (read-only) — Peter's knowledge base and the source of truth for his projects, infrastructure
+(server "kocka", Hermes, Coolify), Kaviareň Poetika work, runbooks, incidents and decisions:
+- When a conversation touches any of Peter's projects, servers, the café or ongoing work, call vault_start
+  FIRST (it returns the agent start note, the project overview and the folder tree), then vault_search /
+  vault_read the relevant notes before answering or asking Peter to re-explain. Prefer the vault over
+  memory when they disagree; mention the note you relied on.
+- vault_search: diacritics-insensitive search over all notes. vault_read: one note by path or name,
+  with its wikilinks and backlinks.
 
 Tools:
 - list_sources: registry + health of each source.
@@ -222,6 +239,48 @@ def msz_document(doc_id: int, page_from: int | None = None, page_to: int | None 
 def msz_sessions(year: int | None = None) -> dict[str, Any]:
     """List indexed MsZ sessions (newest first) with their documents and doc_ids."""
     return {"sessions": index.list_sessions(conn, year, base_url=_egov_base()), "index": index.stats(conn)}
+
+
+def _vault_call(fn, *args, **kwargs) -> dict[str, Any]:
+    if vault is None:
+        return {"error": "vault_not_configured", "message": "VAULT_DIR is not set or not mounted on the server"}
+    try:
+        return fn(*args, **kwargs)
+    except VaultError as exc:
+        return exc.to_dict()
+
+
+@mcp.tool()
+def vault_start(recent: int = 10) -> dict[str, Any]:
+    """START HERE for anything about Peter's projects, servers or the café: returns the agent start note
+    (AGENTS.md), the project overview (00 - Prehľad projektov), the vault folder tree and recently modified notes."""
+    return _vault_call(lambda: vault.start(recent=recent))
+
+
+@mcp.tool()
+def vault_search(query: str, folder: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """Search Peter's Obsidian vault. All words must occur in the note (path or text); case- and
+    diacritics-insensitive ("prehlad" finds "Prehľad"). Returns notes ranked by matches with line snippets.
+
+    Args:
+        query: one or more words.
+        folder: optional vault folder to limit the search, e.g. "Projekty" or "Infraštruktúra".
+        limit: max notes (1-50).
+    """
+    return _vault_call(lambda: vault.search(query, folder=folder, limit=limit))
+
+
+@mcp.tool()
+def vault_read(path: str, start_line: int | None = None, end_line: int | None = None, max_chars: int = 30000) -> dict[str, Any]:
+    """Read one note from Peter's Obsidian vault.
+
+    Args:
+        path: vault-relative path ("Projekty/Zdroje MCP.md", ".md" optional) or a bare note name as in a wikilink ("Obsidian Sync").
+        start_line / end_line: optional 1-based line range for long notes.
+        max_chars: cap on returned text (1000-100000).
+    Returns the text plus outgoing wikilinks and backlinks (notes that link here).
+    """
+    return _vault_call(lambda: vault.read(path, start_line=start_line, end_line=end_line, max_chars=max_chars))
 
 
 # --- ASGI app with token auth ----------------------------------------------

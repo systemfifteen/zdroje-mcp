@@ -34,6 +34,9 @@ class Settings:
     rate_limit_per_host: float
     request_timeout: float
     log_level: str
+    # Obsidian vault (read-only bind mount). None = vault tools report "not configured".
+    vault_dir: Path | None = None
+    vault_exclude: tuple[str, ...] = ()
 
     @property
     def db_path(self) -> Path:
@@ -61,6 +64,10 @@ def load_settings() -> Settings:
 
     cookie = os.environ.get("DENNIKN_COOKIE", "").strip() or None
 
+    vault_raw = os.environ.get("VAULT_DIR", "").strip()
+    vault_dir = Path(vault_raw).expanduser() if vault_raw else None
+    vault_exclude = tuple(p.strip() for p in os.environ.get("VAULT_EXCLUDE", "").split(",") if p.strip())
+
     return Settings(
         mcp_token=os.environ.get("MCP_TOKEN", "").strip(),
         data_dir=data_dir,
@@ -70,4 +77,6 @@ def load_settings() -> Settings:
         rate_limit_per_host=float(os.environ.get("RATE_LIMIT_PER_HOST", "1.0")),
         request_timeout=float(os.environ.get("REQUEST_TIMEOUT", "15")),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        vault_dir=vault_dir,
+        vault_exclude=vault_exclude,
     )
